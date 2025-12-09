@@ -1,0 +1,136 @@
+:root {
+    --bg-color: #1e1e1e;
+    --header-bg: #2d2d2d;
+    --grid-line: #333;
+    --grid-beat: #444;
+    --key-white: #fff;
+    --key-black: #000;
+    --note-color: #4CAF50;
+    --note-selected: #81C784;
+    --playhead-color: #FF5252;
+    --text-color: #eee;
+}
+
+body {
+    margin: 0;
+    padding: 0;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background-color: var(--bg-color);
+    color: var(--text-color);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.container {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}
+
+header {
+    background-color: var(--header-bg);
+    padding: 10px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid #444;
+}
+
+h1 {
+    margin: 0;
+    font-size: 1.2rem;
+    font-weight: normal;
+}
+
+.controls {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+}
+
+button {
+    background-color: #444;
+    border: none;
+    color: white;
+    padding: 8px 16px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    transition: background-color 0.2s;
+}
+
+button:hover {
+    background-color: #555;
+}
+
+button.ai-btn {
+    background-color: #673AB7;
+}
+
+button.ai-btn:hover {
+    background-color: #7E57C2;
+}
+
+.separator {
+    width: 1px;
+    height: 24px;
+    background-color: #555;
+    margin: 0 5px;
+}
+
+.editor-wrapper {
+    flex: 1;
+    display: flex;
+    position: relative;
+    overflow: hidden;
+}
+
+.piano-keys-container {
+    width: 60px;
+    background-color: #222;
+    overflow: hidden;
+    border-right: 1px solid #000;
+    position: relative;
+}
+
+.piano-key {
+    width: 100%;
+    border-bottom: 1px solid #888;
+    box-sizing: border-box;
+    position: absolute;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding-right: 4px;
+    font-size: 10px;
+    color: #555;
+    cursor: pointer;
+}
+
+.piano-key.white {
+    background-color: var(--key-white);
+    color: #333;
+    z-index: 1;
+}
+
+.piano-key.black {
+    background-color: var(--key-black);
+    color: #ccc;
+    height: 60%; /* Visual adjustment usually handled by JS positioning */
+    z-index: 2;
+    width: 60%;
+}
+
+.grid-container {
+    flex: 1;
+    position: relative;
+    overflow: auto;
+    background-color: #222;
+    /* Remove default cursor, let JS handle it */
+}
+
+canvas {
+    display: block;
+}
