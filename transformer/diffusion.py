@@ -1,0 +1,224 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+import numpy as np
+
+class DiscreteDiffusion(nn.Module):
+    def __init__(self, model, vocab_size, mask_token_id, pad_token_id, timesteps=1000):
+        super().__init__()
+        self.model = model
+        self.vocab_size = vocab_size
+        self.mask_token_id = mask_token_id
+        self.pad_token_id = pad_token_id
+        self.timesteps = timesteps
+        
+    def get_mask_prob(self, t):
+        """
+        Cosine schedule for masking rate.
+        t: [batch_size] or float, between 0 and 1 (normalized time)
+        Returns: probability of a token being MASKED at time t.
+        """
+        # We want mask_prob to go from 0 (at t=0) to 1 (at t=1)
+        # Standard cosine schedule: alpha_bar = cos( (t+s)/(1+s) * pi/2 )^2
+        # mask_prob = 1 - alpha_bar
+        
+        s = 0.008
+        if isinstance(t, torch.Tensor):
+            t = t.clamp(0, 1)
+        
+        # Angle goes from s/(1+s)*pi/2 to pi/2
+        angle = (t + s) / (1 + s) * (math.pi / 2)
+        alpha_bar = torch.cos(angle) ** 2
+        
+        # Normalize so alpha_bar(0) = 1
+        alpha_bar_0 = math.cos(s / (1 + s) * (math.pi / 2)) ** 2
+        alpha_bar = alpha_bar / alpha_bar_0
+        
+        return 1 - alpha_bar
+
+    def q_sample(self, x_start, t, mask_strategy='random'):
+        """
+        Forward diffusion process: Corrupt x_start with masks.
+        x_start: [batch, seq_len]
+        t: [batch] (int timesteps)
+        """
+        batch, seq_len = x_start.shape
+        device = x_start.device
+        
+        # Normalize t
+        t_norm = t.float() / self.timesteps
+        mask_probs = self.get_mask_prob(t_norm).to(device) # [batch]
+        
+        # Expand for broadcasting
+        mask_probs = mask_probs.view(batch, 1)
+        
+        # Create mask
+        if mask_strategy == 'random':
+            # Uniform random masking
+            mask_mask = torch.rand(batch, seq_len, device=device) < mask_probs
+            
+        elif mask_strategy == 'span':
+            # Span masking: Mask contiguous blocks
+            # This is better for music to learn phrases
+            # We approximate the mask_prob by placing random spans
+            
+            # Heuristic: Average span length of 4 (typical note definition size)
+            # or larger (e.g., 10) to mask phrases.
+            avg_span_len = 5.0
+            
+            # Number of spans needed to achieve target probability
+            # num_spans * avg_span_len / seq_len = mask_prob
+            # num_spans = mask_prob * seq_len / avg_span_len
+            
+            mask_mask = torch.zeros_like(x_start, dtype=torch.bool)
+            
+            for b in range(batch):
+                p = mask_probs[b].item()
+                if p <= 0: continue
+                if p >= 1: 
+                    mask_mask[b] = True
+                    continue
+                
+                target_masked = int(p * seq_len)
+                current_masked = 0
+                
+                while current_masked < target_masked:
+                    # Pick random start
+                    start = torch.randint(0, seq_len, (1,)).item()
+                    # Pick random length (geometric distribution approx)
+                    length = int(np.random.geometric(1/avg_span_len))
+                    length = min(length, target_masked - current_masked)
+                    
+                    end = min(start + length, seq_len)
+                    mask_mask[b, start:end] = True
+                    current_masked += (end - start)
+                    
+                    # Safety break if we are stuck (e.g. overlapping too much)
+                    # In a real efficient impl, we'd use a better algorithm, but this works for now.
+        
+        else:
+            raise ValueError(f"Unknown mask strategy: {mask_strategy}")
+
+        # Don't mask padding tokens!
+        not_pad = x_start != self.pad_token_id
+        mask_mask = mask_mask & not_pad
+        
+        # Apply mask
+        x_t = x_start.clone()
+        x_t[mask_mask] = self.mask_token_id
+        
+        return x_t, mask_mask
+
+    def compute_loss(self, x_start):
+        """
+        Computes the diffusion loss (Cross Entropy on masked tokens).
+        """
+        batch, seq_len = x_start.shape
+        device = x_start.device
+        
+        # 1. Sample timestep t
+        t = torch.randint(1, self.timesteps + 1, (batch,), device=device)
+        
+        # 2. q_sample (Add noise)
+        # Use 'span' strategy randomly to encourage robustness
+        strategy = 'span' if torch.rand(1).item() < 0.5 else 'random'
+        x_t, mask_mask = self.q_sample(x_start, t, mask_strategy=strategy)
+        
+        # 3. Predict
+        logits = self.model(x_t) # [batch, seq_len, vocab_size]
+        
+        # 4. Loss
+        # Only compute loss on MASKED tokens
+        # Flatten
+        logits = logits.view(-1, self.vocab_size)
+        targets = x_start.view(-1)
+        mask_flat = mask_mask.view(-1)
+        
+        if mask_flat.sum() == 0:
+            # Edge case: no tokens masked (t=0 or very small)
+            return torch.tensor(0.0, device=device, requires_grad=True)
+            
+        loss = F.cross_entropy(logits[mask_flat], targets[mask_flat])
+        
+        return loss
+
+    @torch.no_grad()
+    def sample(self, shape, steps=None, temperature=1.0):
+        """
+        Generate samples from pure noise.
+        shape: (batch, seq_len)
+        """
+        device = next(self.model.parameters()).device
+        batch, seq_len = shape
+        if steps is None:
+            steps = self.timesteps
+            
+        # Start with all MASKs
+        x_t = torch.full(shape, self.mask_token_id, device=device)
+        
+        # Iterative Denoising
+        # We use a simplified "Mask-Predict" style sampling (like VQ-Diffusion / Muse)
+        # At each step, we predict x_0, then re-mask a smaller portion.
+        
+        # Schedule for sampling
+        # We go from t=T (100% masked) to t=0 (0% masked)
+        times = torch.linspace(self.timesteps, 0, steps + 1, device=device).long()
+        
+        for i in range(steps):
+            t_curr = times[i]
+            t_next = times[i+1]
+            
+            # 1. Predict x_0 from x_t
+            logits = self.model(x_t)
+            
+            # Sample from logits with temperature
+            if temperature != 1.0:
+                logits = logits / temperature
+            
+            probs = F.softmax(logits, dim=-1)
+            
+            # Sample predicted tokens
+            x_0_pred = torch.multinomial(probs.view(-1, self.vocab_size), 1).view(batch, seq_len)
+            
+            # 2. Decide which tokens to keep
+            # We want to keep tokens where the model is "confident"
+            # Confidence = probability of the selected token
+            confidence = torch.gather(probs, -1, x_0_pred.unsqueeze(-1)).squeeze(-1)
+            
+            # 3. Re-mask for next step
+            # Calculate how many tokens should be masked at t_next
+            mask_prob_next = self.get_mask_prob(t_next.float() / self.timesteps)
+            num_to_mask = (mask_prob_next * seq_len).long().clamp(min=0)
+            
+            # We keep the (seq_len - num_to_mask) most confident tokens
+            # and mask the rest.
+            
+            # Add noise to confidence to prevent getting stuck? (Gumbel noise)
+            # gumbel = -torch.log(-torch.log(torch.rand_like(confidence) + 1e-9) + 1e-9)
+            # scores = confidence + gumbel
+            scores = confidence # Pure confidence works well for "greedy" masking
+            
+            # Identify tokens to mask
+            # We want to mask the ones with LOWEST score
+            # So we find the threshold
+            
+            # Create next x_t
+            x_next = x_0_pred.clone()
+            
+            if num_to_mask > 0:
+                # Find indices of lowest scores
+                # topk returns highest, so we use negative scores or sort
+                # We want to mask the bottom 'num_to_mask'
+                _, indices = torch.topk(scores, k=num_to_mask, dim=1, largest=False)
+                
+                # Create mask
+                mask = torch.zeros_like(x_next, dtype=torch.bool)
+                mask.scatter_(1, indices, True)
+                
+                x_next[mask] = self.mask_token_id
+            
+            # Update
+            x_t = x_next
+            
+        return x_t
