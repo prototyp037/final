@@ -38,7 +38,7 @@ GRAD_ACCUM_STEPS = 4    # Effective batch size = BATCH_SIZE * GRAD_ACCUM_STEPS
 # Hardware
 DEVICE = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
 NUM_WORKERS = max(1, os.cpu_count() - 2) # Leave some CPUs for the OS/Main thread
-BUFFER_SIZE = 2000      # Number of sequences to keep in buffer
+BUFFER_SIZE = 64      # Number of sequences to keep in buffer
 
 # ==========================================
 # DATA LOADING WORKER
@@ -98,6 +98,19 @@ def data_worker(file_queue, batch_queue, vocab_path, data_dir):
             # print(f"Error processing {file_path}: {e}")
             continue
 
+import threading
+
+# ... (imports)
+
+# ==========================================
+# CONFIGURATION
+# ==========================================
+# ... (existing config)
+NUM_WORKERS = 4 # Reduced for stability
+BUFFER_SIZE = 1000 # Reduced buffer
+
+# ... (data_worker function remains same)
+
 # ==========================================
 # TRAINING SCRIPT
 # ==========================================
@@ -107,6 +120,7 @@ def train():
     os.makedirs(LOG_DIR, exist_ok=True)
     
     # 1. Setup Model
+    # ... (same as before)
     print("Building Vocab...")
     vocab = MusicVocab()
     vocab.build_vocab()
@@ -115,7 +129,7 @@ def train():
     config = MusicGemmaConfig(
         vocab_size=len(vocab.token_to_id),
         hidden_size=512,
-        num_hidden_layers=6,       # Reduced for faster iteration/stability
+        num_hidden_layers=6,
         num_attention_heads=8,
         max_position_embeddings=SEQ_LEN
     )
@@ -133,9 +147,8 @@ def train():
     writer = SummaryWriter(LOG_DIR)
     
     # 2. Prepare Data Queues
-    # file_queue: Holds paths to MIDI files
-    # batch_queue: Holds processed tensor sequences (ready for GPU)
-    file_queue = mp.Queue()
+    # Limit file_queue size to prevent deadlock!
+    file_queue = mp.Queue(maxsize=30000) 
     batch_queue = mp.Queue(maxsize=BUFFER_SIZE)
     
     # 3. Find Files
@@ -161,80 +174,93 @@ def train():
             target=data_worker,
             args=(file_queue, batch_queue, None, DATA_DIR)
         )
-        p.daemon = True # Kill workers if main process dies
+        p.daemon = True
         p.start()
         workers.append(p)
         
+    # Feeder Thread Function
+    def fill_file_queue(files, queue):
+        for f in files:
+            queue.put(f) # Blocks if queue is full
+        # Signal end of epoch
+        for _ in range(NUM_WORKERS):
+            queue.put(None)
+
     # 5. Training Loop
     global_step = 0
     
     for epoch in range(NUM_EPOCHS):
         print(f"\n=== Epoch {epoch+1}/{NUM_EPOCHS} ===")
         
-        # Refill file queue for this epoch
+        # Shuffle files
         random.shuffle(all_files)
-        for f in all_files:
-            file_queue.put(f)
+        
+        # Start Feeder Thread
+        # We use a thread because queue.put might block, and we need the main thread
+        # to run the training loop (consuming batch_queue) to unblock the workers.
+        feeder = threading.Thread(target=fill_file_queue, args=(all_files, file_queue))
+        feeder.start()
             
         # Progress bar
-        pbar = tqdm(total=len(all_files)) # Approx progress (files, not batches)
+        pbar = tqdm(total=len(all_files))
         
         model.train()
         epoch_loss = 0
         batch_buffer = []
         
+        # We need to track how many files processed or batches to know when epoch ends?
+        # Actually, the workers will stop when they get None.
+        # But since we have a continuous stream, we can just run until file_queue is empty AND feeder is done?
+        # Simpler: Just run until we've processed roughly len(all_files) sequences?
+        # No, one file -> multiple sequences.
+        
+        # Let's just run until the feeder is done and queues are empty.
+        
         while True:
-            # Check if we are done with files and buffer is empty
-            if file_queue.empty() and batch_queue.empty():
+            # Check if feeder is alive or queue has items
+            if not feeder.is_alive() and file_queue.empty() and batch_queue.empty():
                 break
                 
             try:
                 # Fetch sequence from buffer
-                # timeout=1 prevents infinite blocking if workers die
                 seq_list = batch_queue.get(timeout=1)
                 batch_buffer.append(seq_list)
                 
                 # If we have enough for a batch
                 if len(batch_buffer) >= BATCH_SIZE:
-                    # Convert to Tensor and move to GPU
+                    # ... (Training step)
                     batch_tensor = torch.tensor(batch_buffer, dtype=torch.long).to(DEVICE)
-                    batch_buffer = [] # Clear buffer
+                    batch_buffer = [] 
                     
-                    # Forward Pass
                     loss = model.compute_loss(batch_tensor)
                     loss = loss / GRAD_ACCUM_STEPS
-                    
-                    # Backward Pass
                     loss.backward()
                     
                     epoch_loss += loss.item() * GRAD_ACCUM_STEPS
                     
-                    # Optimizer Step
                     if (global_step + 1) % GRAD_ACCUM_STEPS == 0:
                         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                         optimizer.step()
                         optimizer.zero_grad()
                         
-                        # Logging
                         writer.add_scalar("Loss/train", loss.item() * GRAD_ACCUM_STEPS, global_step)
                         pbar.set_description(f"Loss: {loss.item() * GRAD_ACCUM_STEPS:.4f}")
                     
                     global_step += 1
-                    pbar.update(1) # Update roughly per batch (not per file, but good enough visual)
+                    pbar.update(1) 
                     
-                    # Save Checkpoint
                     if global_step % 1000 == 0:
                         save_path = os.path.join(CHECKPOINT_DIR, f"model_step_{global_step}.pt")
                         torch.save(model.state_dict(), save_path)
                         
             except Exception as e:
-                # Queue might be empty temporarily while workers catch up
-                if file_queue.empty() and batch_queue.empty():
-                    break
+                # Timeout
                 continue
-                
+        
+        feeder.join()
+        
         # End of Epoch
-        avg_loss = epoch_loss / (global_step + 1) # Approx
+        avg_loss = epoch_loss / (global_step + 1)
         print(f"Epoch {epoch+1} Finished. Avg Loss: {avg_loss:.4f}")
         torch.save(model.state_dict(), os.path.join(CHECKPOINT_DIR, "model_latest.pt"))
 
