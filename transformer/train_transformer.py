@@ -21,6 +21,8 @@ from preprocessing import MIDIPreprocessor
 
 if os.name == 'nt':  # Windows
     DATA_DIR = "C:\\Users\\037co\\Downloads\\lmd_full" # Change this to your dataset path
+    CHECKPOINT_DIR = "C:\\Users\\037co\\Desktop\\MelosonProject\\checkpoints"
+    LOG_DIR = "C:\\Users\\037co\\Desktop\\MelosonProject\\logs"
 
 else:  # macOS/Linux
 
