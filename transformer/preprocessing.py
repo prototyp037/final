@@ -53,7 +53,8 @@ class MIDIPreprocessor:
     def __init__(self, data_dir, output_dir):
         self.data_dir = data_dir
         self.output_dir = output_dir
-        os.makedirs(output_dir, exist_ok=True)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
 
     def quantize_time(self, time, ticks_per_beat, original_ticks_per_beat):
         # Convert original time to beats, then to quantized ticks

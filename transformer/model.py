@@ -5,9 +5,16 @@ import torch.nn.functional as F
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
+
+
 @dataclass
+
+#this model definition and logic is adapted from Gemma
+#most of the code is based on the original Gemma implementation: https://github.com/google/gemma_pytorch
+
+
 class MusicGemmaConfig:
-    vocab_size: int = 512 # Will be overwritten by actual vocab size
+    vocab_size: int = 512 # will be overridden later
     hidden_size: int = 512
     intermediate_size: int = 2048
     num_hidden_layers: int = 8
