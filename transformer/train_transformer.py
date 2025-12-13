@@ -24,7 +24,7 @@ if os.name == 'nt':  # Windows
 
     # Model Hyperparameters
     SEQ_LEN = 1024          # Sequence length for training
-    BATCH_SIZE = 8
+    BATCH_SIZE = 16
     LEARNING_RATE = 1e-4
     NUM_EPOCHS = 3
     GRAD_ACCUM_STEPS = 4    # Effective batch size = BATCH_SIZE * GRAD_ACCUM_STEPS
