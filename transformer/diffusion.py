@@ -222,3 +222,81 @@ class DiscreteDiffusion(nn.Module):
             x_t = x_next
             
         return x_t
+
+    @torch.no_grad()
+    def infill(self, input_ids, mask_mask, steps=None, temperature=1.0):
+        """
+        Infill/Continue a sequence.
+        input_ids: [batch, seq_len] - The sequence with known tokens.
+        mask_mask: [batch, seq_len] - True where we want to generate, False where we keep fixed.
+        """
+        device = input_ids.device
+        batch, seq_len = input_ids.shape
+        if steps is None:
+            steps = self.timesteps
+            
+        # Start: Known tokens are kept, unknown are MASKed
+        x_t = input_ids.clone()
+        x_t[mask_mask] = self.mask_token_id
+        
+        times = torch.linspace(self.timesteps, 0, steps + 1, device=device).long()
+        
+        for i in range(steps):
+            t_curr = times[i]
+            t_next = times[i+1]
+            
+            # 1. Predict x_0
+            logits = self.model(x_t)
+            if temperature != 1.0:
+                logits = logits / temperature
+            probs = F.softmax(logits, dim=-1)
+            x_0_pred = torch.multinomial(probs.view(-1, self.vocab_size), 1).view(batch, seq_len)
+            
+            # 2. Confidence
+            confidence = torch.gather(probs, -1, x_0_pred.unsqueeze(-1)).squeeze(-1)
+            
+            # 3. Re-mask
+            # Only re-mask within the 'mask_mask' region!
+            # We want to gradually reveal tokens in the masked region.
+            
+            mask_prob_next = self.get_mask_prob(t_next.float() / self.timesteps)
+            
+            # Total tokens to be masked at next step (global)
+            # But we only care about the region we are generating.
+            # Let's say we want to keep (1 - mask_prob) of the *target* region.
+            
+            # Number of tokens to mask *within the target region*
+            num_target_tokens = mask_mask.sum(dim=1, keepdim=True) # [batch, 1]
+            num_to_mask = (mask_prob_next * num_target_tokens).long()
+            
+            x_next = x_0_pred.clone()
+            
+            # Force known tokens
+            x_next[~mask_mask] = input_ids[~mask_mask]
+            
+            # Apply re-masking only to target region
+            if num_to_mask.max() > 0:
+                # Set confidence of fixed tokens to infinity so they are never masked
+                scores = confidence.clone()
+                scores[~mask_mask] = float('inf')
+                
+                # We want to mask the lowest scores
+                # But since fixed tokens are inf, they won't be picked unless everything is inf
+                
+                # We need to mask 'num_to_mask' tokens per batch item
+                # torch.topk doesn't support per-row k if k varies.
+                # Simplified: assume k is roughly same or use loop.
+                # For batch=1 (inference), it's easy.
+                
+                for b in range(batch):
+                    k = num_to_mask[b].item()
+                    if k > 0:
+                        # Get scores for this batch
+                        b_scores = scores[b]
+                        # Find k lowest
+                        _, indices = torch.topk(b_scores, k=k, largest=False)
+                        x_next[b, indices] = self.mask_token_id
+            
+            x_t = x_next
+            
+        return x_t

@@ -22,5 +22,6 @@
 - [x] Inference Script (`inference.py`)
 
 ## Integration
-- [ ] Connect Frontend to Backend API
-- [ ] Implement "AI Fill" logic in Backend to call Model
+- [x] Connect Frontend to Backend API
+- [x] Implement "AI Fill" logic in Backend to call Model
+- [ ] Verify End-to-End Generation (Waiting for Model Checkpoint)

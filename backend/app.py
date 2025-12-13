@@ -1,10 +1,64 @@
 from flask import Flask, send_from_directory, jsonify, request
 from flask_cors import CORS
 import os
+import sys
+import torch
+
+# Add transformer directory to path
+sys.path.append(os.path.join(os.path.dirname(__file__), '../transformer'))
+
+from model import MusicGemma, MusicGemmaConfig
+from diffusion import DiscreteDiffusion
+from vocab import MusicVocab
+from preprocessing import MIDIPreprocessor
 
 app = Flask(__name__, static_folder='../frontend')
 CORS(app)
 
+# global states/variables
+model = None
+vocab = None
+preprocessor = None
+DEVICE = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
+CHECKPOINT_PATH = os.path.join(os.path.dirname(__file__), '../transformer/checkpoints/model_latest.pt')
+
+def load_model():
+    global model, vocab, preprocessor
+    print(f"Loading model on {DEVICE}...")
+    
+    vocab = MusicVocab()
+    vocab.build_vocab()
+    
+    preprocessor = MIDIPreprocessor("", "") # Dirs not needed for conversion
+    
+    config = MusicGemmaConfig(
+        vocab_size=len(vocab.token_to_id),
+        hidden_size=512,
+        num_hidden_layers=6,
+        num_attention_heads=8,
+        max_position_embeddings=1024
+    )
+    
+    transformer = MusicGemma(config)
+    model = DiscreteDiffusion(
+        model=transformer,
+        vocab_size=config.vocab_size,
+        mask_token_id=vocab.mask_token_id,
+        pad_token_id=vocab.pad_token_id,
+        timesteps=1000
+    ).to(DEVICE)
+    
+    if os.path.exists(CHECKPOINT_PATH):
+        state_dict = torch.load(CHECKPOINT_PATH, map_location=DEVICE)
+        model.load_state_dict(state_dict)
+        print("Model loaded successfully.")
+    else:
+        print(f"Warning: Checkpoint {CHECKPOINT_PATH} not found.")
+        #we use untrained/random weight as a placeholder for now
+    
+    model.eval()
+
+#needed for flask serving
 @app.route('/')
 def serve_index():
     return send_from_directory(app.static_folder, 'index.html')
@@ -15,19 +69,62 @@ def serve_static(path):
 
 @app.route('/api/generate', methods=['POST'])
 def generate_music():
-    # Placeholder for AI generation logic
-    data = request.json
-    current_notes = data.get('notes', [])
-    
-    # TODO: Call PyTorch model here
-    
-    return jsonify({
-        "status": "success",
-        "message": "Generation not implemented yet",
-        "notes": current_notes # Just echo back for now
-    })
+    if model is None:
+        load_model()
+        
+    try:
+        data = request.json
+        current_notes = data.get('notes', [])
+        
+        #Convert Context to Tokens
+        token_str = preprocessor.json_to_tokens(current_notes)
+        token_ids = vocab.encode(token_str.split())
+        
+        #Prepare Input Tensor
+        seq_len = 1024
+        input_ids = torch.full((1, seq_len), vocab.pad_token_id, dtype=torch.long).to(DEVICE)
+        
+        known_len = min(len(token_ids), seq_len)
+        if known_len > 0:
+            input_ids[0, :known_len] = torch.tensor(token_ids[:known_len]).to(DEVICE)
+            
+        #Create Mask (for continuation generation)
+        # Mask everything after the known notes
+        mask = torch.zeros((1, seq_len), dtype=torch.bool).to(DEVICE)
+        mask[0, known_len:] = True
+        
+        # If context is full, we can't generate more. 
+        #For now, just return if full.
+        if known_len >= seq_len:
+            return jsonify({"status": "error", "message": "Context too long"})
+            
+        # Run Inference
+        print(f"Generating with context length {known_len}...")
+        with torch.no_grad():
+            output_ids = model.infill(input_ids, mask, steps=50)
+            
+        # Decode
+        out_tokens = vocab.decode(output_ids[0].cpu().tolist())
+        # Filter specials
+        out_tokens = [t for t in out_tokens if t not in vocab.specials]
+        
+        # Convert to JSON
+        new_notes = preprocessor.tokens_to_json(" ".join(out_tokens))
+        
+        print(f"Generated {len(new_notes)} notes.")
+        
+        return jsonify({
+            "status": "success",
+            "notes": new_notes
+        })
+        
+    except Exception as e:
+        print(f"Generation Error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == '__main__':
     print("Starting server at http://localhost:5000")
+    # Pre-load model
+    # load_model() 
     app.run(debug=True, port=5000)
 

@@ -4,12 +4,10 @@ import numpy as np
 from tqdm import tqdm
 import math
 
-# ==========================================
 # CONFIGURATION
-# ==========================================
 # Resolution: Ticks per beat.
-# We use a "Performance" representation (TimeShift based) instead of "REMI" (Bar/Pos).
-# This allows for ANY time signature and complex polyphony.
+# Use a "Performance" representation (TimeShift based) instead of "REMI" (Bar/Pos) (old project style)
+# Allows for ANY time signature and complex polyphony.
 # 12 ticks per beat = 48 ticks per bar (in 4/4).
 # Supports triplets (4 ticks) and 16ths (3 ticks).
 TICKS_PER_BEAT = 12 
@@ -20,7 +18,7 @@ TICKS_PER_BEAT = 12
 MAX_TIME_SHIFT = 48
 
 # Instrument Classes (Simplified General MIDI)
-# We map 128 programs to fewer categories to reduce vocabulary size.
+# Map 128 programs to fewer categories to reduce vocabulary size.
 # Names must not contain spaces for tokenization safety.
 INSTRUMENT_CLASSES = [
     (0, 8, 'Piano'),
@@ -72,8 +70,6 @@ class MIDIPreprocessor:
         except Exception as e:
             return None
 
-        # Note: We REMOVED the 4/4 time signature check.
-        # This implementation is now Time Signature Agnostic.
         
         notes = []
         original_ticks_per_beat = midi_obj.ticks_per_beat
@@ -132,6 +128,23 @@ class MIDIPreprocessor:
             events.append(f"Pitch_{note['pitch']}")
             events.append(f"Vel_{note['velocity'] // 16}") # Quantize velocity
             events.append(f"Dur_{note['duration']}")
+
+        # Clean up: Remove leading/trailing TimeShifts
+        # We want the music to start immediately and end immediately
+        
+        # Remove leading TimeShifts
+        while events and events[0].startswith("TimeShift_"):
+            events.pop(0)
+            
+        # Remove trailing TimeShifts
+        while events and events[-1].startswith("TimeShift_"):
+            events.pop()
+            
+        if not events:
+            return None
+            
+        # Add Special Tokens
+        events = ["<bos>"] + events + ["<eos>"]
 
         return " ".join(events)
 
@@ -203,6 +216,95 @@ class MIDIPreprocessor:
             midi_obj.dump(output_path)
             
         return midi_obj
+
+    def json_to_tokens(self, json_notes):
+        """
+        Converts Frontend JSON notes to Token String.
+        json_notes: list of {pitch, startTime, duration, instrument}
+        """
+        notes = []
+        for n in json_notes:
+            # Map frontend instrument names to classes
+            # Frontend: "piano", "drums", "bass", "strings"
+            # Classes: "Piano", "Drums", "Bass", "Strings" (Capitalized)
+            inst = n.get('instrument', 'piano').capitalize()
+            if inst == 'Drums': inst = 'Drums' # Special case if needed
+            
+            # Quantize
+            start_tick = int(round(n['startTime'] * TICKS_PER_BEAT))
+            duration = int(round(n['duration'] * TICKS_PER_BEAT))
+            duration = max(1, min(96, duration))
+            
+            notes.append({
+                'start': start_tick,
+                'pitch': n['pitch'],
+                'velocity': 100, # Default velocity
+                'duration': duration,
+                'instrument': inst
+            })
+            
+        notes.sort(key=lambda x: (x['start'], x['pitch'], x['instrument']))
+        
+        events = []
+        current_tick = 0
+        
+        for note in notes:
+            delta = note['start'] - current_tick
+            if delta > 0:
+                while delta > MAX_TIME_SHIFT:
+                    events.append(f"TimeShift_{MAX_TIME_SHIFT}")
+                    delta -= MAX_TIME_SHIFT
+                if delta > 0:
+                    events.append(f"TimeShift_{delta}")
+                current_tick = note['start']
+            
+            events.append(f"Inst_{note['instrument']}")
+            events.append(f"Pitch_{note['pitch']}")
+            events.append(f"Vel_{note['velocity'] // 16}")
+            events.append(f"Dur_{note['duration']}")
+            
+        return " ".join(events)
+
+    def tokens_to_json(self, token_str):
+        """
+        Converts Token String back to Frontend JSON notes.
+        """
+        tokens = token_str.split()
+        json_notes = []
+        
+        current_tick = 0
+        current_inst = "Piano"
+        current_pitch = 60
+        current_vel = 100
+        
+        for token in tokens:
+            if token.startswith("TimeShift_"):
+                shift = int(token.split("_")[1])
+                current_tick += shift
+                
+            elif token.startswith("Inst_"):
+                current_inst = token.split("_")[1].lower()
+                
+            elif token.startswith("Pitch_"):
+                current_pitch = int(token.split("_")[1])
+                
+            elif token.startswith("Vel_"):
+                current_vel = int(token.split("_")[1]) * 16
+                
+            elif token.startswith("Dur_"):
+                duration_ticks = int(token.split("_")[1])
+                
+                # Create Note
+                json_notes.append({
+                    "pitch": current_pitch,
+                    "startTime": current_tick / TICKS_PER_BEAT,
+                    "duration": duration_ticks / TICKS_PER_BEAT,
+                    "instrument": current_inst,
+                    "velocity": current_vel / 127
+                })
+                
+        return json_notes
+
 
     def process_dataset(self):
         files = []
