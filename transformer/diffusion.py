@@ -59,43 +59,35 @@ class DiscreteDiffusion(nn.Module):
             mask_mask = torch.rand(batch, seq_len, device=device) < mask_probs
             
         elif mask_strategy == 'span':
-            # Span masking: Mask contiguous blocks
-            # This is better for music to learn phrases
-            # We approximate the mask_prob by placing random spans
+            # Vectorized Span Masking (Efficient)
+            # Instead of iterative loops, we use max_pool1d to expand random start points.
             
-            # Heuristic: Average span length of 4 (typical note definition size)
-            # or larger (e.g., 10) to mask phrases.
-            avg_span_len = 5.0
+            span_len = 5 # Fixed span length for efficiency
             
-            # Number of spans needed to achieve target probability
-            # num_spans * avg_span_len / seq_len = mask_prob
-            # num_spans = mask_prob * seq_len / avg_span_len
+            # Probability of a token being the start of a span
+            # p_start ~= p_mask / span_len
+            prob_start = mask_probs / span_len
             
-            mask_mask = torch.zeros_like(x_start, dtype=torch.bool)
+            # Generate start points [batch, seq_len]
+            starts = torch.rand(batch, seq_len, device=device) < prob_start
             
-            for b in range(batch):
-                p = mask_probs[b].item()
-                if p <= 0: continue
-                if p >= 1: 
-                    mask_mask[b] = True
-                    continue
-                
-                target_masked = int(p * seq_len)
-                current_masked = 0
-                
-                while current_masked < target_masked:
-                    # Pick random start
-                    start = torch.randint(0, seq_len, (1,)).item()
-                    # Pick random length (geometric distribution approx)
-                    length = int(np.random.geometric(1/avg_span_len))
-                    length = min(length, target_masked - current_masked)
-                    
-                    end = min(start + length, seq_len)
-                    mask_mask[b, start:end] = True
-                    current_masked += (end - start)
-                    
-                    # Safety break if we are stuck (e.g. overlapping too much)
-                    # In a real efficient impl, we'd use a better algorithm, but this works for now.
+            # Expand using Max Pooling
+            # [batch, 1, seq_len]
+            starts_float = starts.float().unsqueeze(1)
+            
+            # Max pool smears the 1s to create spans
+            # kernel_size=span_len, stride=1, padding=span_len//2 centers the span
+            mask_float = F.max_pool1d(
+                starts_float, 
+                kernel_size=span_len, 
+                stride=1, 
+                padding=span_len // 2
+            )
+            
+            mask_mask = mask_float.squeeze(1) > 0
+            
+            # Ensure size matches (padding might cause slight mismatch)
+            mask_mask = mask_mask[:, :seq_len]
         
         else:
             raise ValueError(f"Unknown mask strategy: {mask_strategy}")
@@ -122,7 +114,8 @@ class DiscreteDiffusion(nn.Module):
         
         # 2. q_sample (Add noise)
         # Use 'span' strategy randomly to encourage robustness
-        strategy = 'span' if torch.rand(1).item() < 0.5 else 'random'
+        # Use numpy for boolean choice to avoid GPU sync
+        strategy = 'span' if np.random.rand() < 0.5 else 'random'
         x_t, mask_mask = self.q_sample(x_start, t, mask_strategy=strategy)
         
         # 3. Predict
