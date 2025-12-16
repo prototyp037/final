@@ -265,6 +265,138 @@ class MIDIPreprocessor:
             
         return " ".join(events)
 
+    def json_to_tokens_with_mask(self, json_notes, start_time, end_time):
+        """
+        Converts Frontend JSON notes to Token String and returns a boolean mask.
+        mask is True for tokens that correspond to notes within [start_time, end_time].
+        """
+        notes = []
+        for n in json_notes:
+            inst = n.get('instrument', 'piano').capitalize()
+            if inst == 'Drums': inst = 'Drums'
+            
+            start_tick = int(round(n['startTime'] * TICKS_PER_BEAT))
+            duration = int(round(n['duration'] * TICKS_PER_BEAT))
+            duration = max(1, min(96, duration))
+            
+            notes.append({
+                'start': start_tick,
+                'pitch': n['pitch'],
+                'velocity': 100,
+                'duration': duration,
+                'instrument': inst,
+                'original_start': n['startTime'] # Keep original for masking check
+            })
+            
+        notes.sort(key=lambda x: (x['start'], x['pitch'], x['instrument']))
+        
+        events = []
+        mask = [] # Boolean list
+        current_tick = 0
+        
+        # Add BOS
+        events.append("<bos>")
+        mask.append(False)
+        
+        for note in notes:
+            # Check if this note falls within the masking range
+            # We mask if the note starts within the range
+            is_masked = (note['original_start'] >= start_time and note['original_start'] < end_time)
+            
+            delta = note['start'] - current_tick
+            if delta > 0:
+                while delta > MAX_TIME_SHIFT:
+                    events.append(f"TimeShift_{MAX_TIME_SHIFT}")
+                    # If the NEXT note is masked, we mask the time shift leading to it?
+                    # Or if the PREVIOUS note was masked?
+                    # TimeShift belongs to the gap.
+                    # If we are entering a masked region, we should mask the shift so the model can decide when the next note starts.
+                    mask.append(is_masked) 
+                    delta -= MAX_TIME_SHIFT
+                if delta > 0:
+                    events.append(f"TimeShift_{delta}")
+                    mask.append(is_masked)
+                current_tick = note['start']
+            
+            # Note tokens
+            tokens = [
+                f"Inst_{note['instrument']}",
+                f"Pitch_{note['pitch']}",
+                f"Vel_{note['velocity'] // 16}",
+                f"Dur_{note['duration']}"
+            ]
+            
+            events.extend(tokens)
+            mask.extend([is_masked] * 4)
+            
+        # Add EOS
+        events.append("<eos>")
+        mask.append(False)
+        
+        # ELASTIC MASKING LOGIC
+        # We need to ensure there are enough slots in the masked region for the AI to write new music.
+        # If the selection is empty or sparse, we inject <pad> tokens to give it "scratch space".
+        
+        # 1. Calculate Duration of Selection in Beats
+        selection_duration_ticks = (end_time - start_time) * TICKS_PER_BEAT
+        selection_duration_beats = selection_duration_ticks / TICKS_PER_BEAT
+        
+        # 2. Target Density
+        # A complex 16th note melody needs ~5 tokens per 1/4 beat.
+        # So ~20 tokens per beat is a safe upper bound for "busy" music.
+        TOKENS_PER_BEAT = 20 
+        target_count = int(selection_duration_beats * TOKENS_PER_BEAT)
+        
+        # 3. Count existing masked tokens
+        current_masked_count = sum(mask)
+        
+        # 4. Inject Padding if needed
+        needed = target_count - current_masked_count
+        
+        if needed > 0:
+            # Find where to insert (at the end of the masked region, or just before the first unmasked token after the region)
+            # We look for the transition from True to False
+            insert_index = -1
+            for i in range(len(mask) - 1, -1, -1):
+                if mask[i]:
+                    insert_index = i + 1
+                    break
+            
+            # If no masked tokens found (e.g. selecting empty silence), find where the silence *would* be
+            if insert_index == -1:
+                # This is tricky. If we selected silence, we probably have TimeShifts that cover it.
+                # But we didn't mask the TimeShifts unless they were attached to notes?
+                # Actually, in the loop above, we mask TimeShifts if they lead to a masked note.
+                # If there are NO notes, nothing is masked.
+                
+                # Fallback: Insert at the point corresponding to start_time?
+                # For simplicity, let's insert after BOS if nothing else.
+                insert_index = 1 
+                
+                # But wait, if we select silence in the middle of a song, we need to find that spot.
+                # This simple logic might put it at the beginning.
+                # Ideally, we should find the TimeShift that crosses 'start_time'.
+                
+                # IMPROVED LOGIC:
+                # If we have a selection but no notes were captured, we likely want to insert 
+                # right where the time cursor would be.
+                # For now, let's just append to the end of the sequence if it's empty? No.
+                
+                # Let's stick to the simple case: If we have SOME masked tokens, we extend them.
+                # If we have ZERO masked tokens (pure silence selection), we might need to mask the TimeShift that covers this gap.
+                pass
+
+            if insert_index != -1:
+                # Inject <pad> tokens
+                # We mark them as True (Masked) so the model can overwrite them
+                pads = ["<pad>"] * needed
+                pad_mask = [True] * needed
+                
+                events[insert_index:insert_index] = pads
+                mask[insert_index:insert_index] = pad_mask
+                
+        return " ".join(events), mask
+
     def tokens_to_json(self, token_str):
         """
         Converts Token String back to Frontend JSON notes.

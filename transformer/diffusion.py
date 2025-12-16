@@ -15,7 +15,7 @@ class DiscreteDiffusion(nn.Module):
         
     def get_mask_prob(self, t):
         """
-        Cosine schedule for masking rate.
+        Cosine schedule for masking rate. (changed from linear to cosine)
         t: [batch_size] or float, between 0 and 1 (normalized time)
         Returns: probability of a token being MASKED at time t.
         """

@@ -26,6 +26,8 @@ def generate(num_samples=1, steps=100, temperature=1.0, output_prefix="gen"):
         num_attention_heads=8,
         max_position_embeddings=1024
     )
+
+    # The configuration MUST BE THE SAME as the one used to train the model.
     
     transformer = MusicGemma(config)
     model = DiscreteDiffusion(

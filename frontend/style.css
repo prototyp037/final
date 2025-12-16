@@ -73,6 +73,20 @@ button.ai-btn:hover {
     background-color: #7E57C2;
 }
 
+button.ai-btn.secondary {
+    background-color: #2196F3;
+}
+
+button.ai-btn.secondary:hover {
+    background-color: #1976D2;
+}
+
+button:disabled {
+    background-color: #333;
+    color: #777;
+    cursor: not-allowed;
+}
+
 .separator {
     width: 1px;
     height: 24px;
@@ -93,6 +107,7 @@ button.ai-btn:hover {
     overflow: hidden;
     border-right: 1px solid #000;
     position: relative;
+    height: 100%; /* Force container to match parent height */
 }
 
 .piano-key {

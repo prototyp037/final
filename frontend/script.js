@@ -3,8 +3,8 @@ const CONFIG = {
     noteHeight: 20,
     beatWidth: 40,
     totalBeats: 32, // 8 bars of 4/4
-    startOctave: 2,
-    endOctave: 6,
+    startOctave: 0, // A0 is in octave 0
+    endOctave: 8,   // C8 is in octave 8
     tempo: 120,
     snap: 4 // 1/4 beat (16th note)
 };
@@ -171,7 +171,7 @@ function initPianoKeys() {
         pianoKeysContainer.appendChild(key);
     }
     // Adjust container height to match canvas
-    pianoKeysContainer.style.height = `${canvasHeight}px`;
+    // pianoKeysContainer.style.height = `${canvasHeight}px`; // REMOVED: Let CSS handle container height
 }
 
 // Drawing
@@ -330,10 +330,15 @@ canvas.addEventListener('mousemove', handleMouseMove);
 canvas.addEventListener('mouseup', handleMouseUp);
 canvas.addEventListener('dblclick', handleDoubleClick);
 
+// Sync Scroll
+gridContainer.addEventListener('scroll', () => {
+    pianoKeysContainer.scrollTop = gridContainer.scrollTop;
+});
+
 function handleMouseDown(e) {
     const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left + gridContainer.scrollLeft;
-    const y = e.clientY - rect.top + gridContainer.scrollTop;
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
     
     const note = getNoteAt(x, y);
     const activeNotes = project.tracks[project.activeTrackId].notes;
@@ -413,8 +418,8 @@ function handleMouseDown(e) {
 
 function handleMouseMove(e) {
     const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left + gridContainer.scrollLeft;
-    const y = e.clientY - rect.top + gridContainer.scrollTop;
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
     
     if (interactionState.mode === 'idle') {
         const note = getNoteAt(x, y);
@@ -517,8 +522,8 @@ function handleMouseUp(e) {
 
 function handleDoubleClick(e) {
     const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left + gridContainer.scrollLeft;
-    const y = e.clientY - rect.top + gridContainer.scrollTop;
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
     
     const note = getNoteAt(x, y);
     if (note) {
@@ -647,6 +652,79 @@ document.getElementById('generateBtn').addEventListener('click', async () => {
     } catch (error) {
         console.error("Generation failed:", error);
         alert("Generation failed. Is the backend running?");
+    } finally {
+        btn.innerText = originalText;
+        btn.disabled = false;
+    }
+});
+
+document.getElementById('improveBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('improveBtn');
+    
+    if (interactionState.selectedNotes.size === 0) {
+        alert("Please select some notes to improve first!");
+        return;
+    }
+    
+    const originalText = btn.innerText;
+    btn.innerText = "Improving...";
+    btn.disabled = true;
+    
+    try {
+        const activeTrack = project.tracks[project.activeTrackId];
+        
+        // Calculate selection range
+        let minStart = Infinity;
+        let maxEnd = -Infinity;
+        
+        interactionState.selectedNotes.forEach(n => {
+            if (n.startTime < minStart) minStart = n.startTime;
+            if (n.startTime + n.duration > maxEnd) maxEnd = n.startTime + n.duration;
+        });
+        
+        // Prepare notes
+        const notesToSend = activeTrack.notes.map(n => ({
+            ...n,
+            instrument: activeTrack.instrument
+        }));
+        
+        const response = await fetch('/api/improve', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+                notes: notesToSend,
+                range: { start: minStart, end: maxEnd }
+            })
+        });
+        
+        const data = await response.json();
+        
+        if (data.status === 'success') {
+            console.log("Received improved notes:", data.notes);
+            
+            // Update notes
+            const newNotes = [];
+            data.notes.forEach(n => {
+                if (typeof n.pitch === 'number' && typeof n.startTime === 'number' && typeof n.duration === 'number') {
+                    newNotes.push({
+                        pitch: n.pitch,
+                        startTime: n.startTime,
+                        duration: n.duration
+                    });
+                }
+            });
+            
+            activeTrack.notes = newNotes;
+            interactionState.selectedNotes.clear(); // Clear selection as notes are new objects
+            saveState();
+            
+        } else {
+            alert("Error: " + data.message);
+        }
+        
+    } catch (error) {
+        console.error("Improvement failed:", error);
+        alert("Improvement failed. Is the backend running?");
     } finally {
         btn.innerText = originalText;
         btn.disabled = false;
