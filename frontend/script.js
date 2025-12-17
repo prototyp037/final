@@ -1,3 +1,6 @@
+//JS will use came case for variable and function names
+
+
 // Configuration
 const CONFIG = {
     noteHeight: 20,
@@ -25,7 +28,6 @@ let history = [];
 let historyIndex = -1;
 
 function saveState() {
-    // Deep copy project state
     const state = JSON.parse(JSON.stringify(project));
     
     // Remove future history if we are in the middle
@@ -64,7 +66,7 @@ saveState();
 
 let isPlaying = false;
 
-// DOM Elements
+// HTML Elements
 const canvas = document.getElementById('pianoRollCanvas');
 const ctx = canvas.getContext('2d');
 const pianoKeysContainer = document.getElementById('pianoKeys');
@@ -91,33 +93,17 @@ const synths = {
 
 // Helper: Pitch to Y coordinate
 function getPitchY(pitch) {
-    // Pitch 0 is the highest note in our range (top of canvas)
-    // We need to map MIDI pitch to Y.
-    // Let's say startOctave C is at the bottom.
-    // MIDI note for C2 is 36.
+
     const startNote = CONFIG.startOctave * 12 + 12; // C2 = 36 (MIDI standard usually C4=60)
-    // Actually let's just use relative indices.
-    // 0 is the lowest note (bottom), totalKeys-1 is highest (top).
-    // But canvas Y=0 is top.
-    // So Y = (totalKeys - 1 - (pitch - startNote)) * noteHeight
-    
-    // Let's simplify: index 0 is the highest note drawn at y=0
-    // index totalKeys-1 is the lowest note drawn at bottom.
-    // So if pitch index is 0 (highest), y=0.
-    // We need to map MIDI pitch to this index.
     
     const maxMidi = (CONFIG.endOctave + 1) * 12 + 11; // B6
     const minMidi = CONFIG.startOctave * 12; // C2
     
-    // Let's define the range explicitly
-    // We want to draw from Top (High Pitch) to Bottom (Low Pitch)
-    // High pitch: B6 (Midi 83) -> Y=0
-    // Low pitch: C2 (Midi 24) -> Y=Height
+
     
     const topMidi = (CONFIG.endOctave + 1) * 12 - 1; // B of endOctave
     const bottomMidi = CONFIG.startOctave * 12;      // C of startOctave
     
-    // y = (topMidi - pitch) * noteHeight
     return (topMidi - pitch) * CONFIG.noteHeight;
 }
 
@@ -127,7 +113,7 @@ function getYPitch(y) {
     return topMidi - index;
 }
 
-// Helper: Time to X coordinate
+// Time to X coordinate
 function getTimeX(beat) {
     return beat * CONFIG.beatWidth;
 }
@@ -136,7 +122,7 @@ function getXTime(x) {
     return x / CONFIG.beatWidth;
 }
 
-// Note names
+// Note names (chose sharps over flats for simplicity)
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 
 function getNoteName(midi) {
@@ -454,13 +440,6 @@ function handleMouseMove(e) {
             const initial = interactionState.initialNotes.get(note);
             if (!initial) return; // Should not happen for resize usually (single note)
             
-            // Only resize the target note usually, but let's support multi-resize if we want
-            // For now, let's assume we only resize the note we clicked on if multiple are selected?
-            // Or resize all? Let's resize all selected.
-            
-            // Actually, usually resize is specific to the note edge clicked.
-            // If we have multiple notes selected, resizing one usually resizes all?
-            // Let's stick to resizing all selected notes by the same amount.
             
             let newDuration = initial.duration + beatDelta;
             
@@ -693,7 +672,9 @@ document.getElementById('improveBtn').addEventListener('click', async () => {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ 
                 notes: notesToSend,
-                range: { start: minStart, end: maxEnd }
+                range: { start: minStart, end: maxEnd },
+                temperature: 0.9, // Slightly lower temp for more coherent infilling
+                steps: 50
             })
         });
         

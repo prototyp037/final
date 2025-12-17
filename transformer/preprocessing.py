@@ -294,29 +294,45 @@ class MIDIPreprocessor:
         mask = [] # Boolean list
         current_tick = 0
         
+        start_tick_selection = int(round(start_time * TICKS_PER_BEAT))
+        end_tick_selection = int(round(end_time * TICKS_PER_BEAT))
+        
         # Add BOS
         events.append("<bos>")
         mask.append(False)
         
         for note in notes:
             # Check if this note falls within the masking range
-            # We mask if the note starts within the range
-            is_masked = (note['original_start'] >= start_time and note['original_start'] < end_time)
+            is_note_masked = (note['start'] >= start_tick_selection and note['start'] < end_tick_selection)
             
             delta = note['start'] - current_tick
             if delta > 0:
                 while delta > MAX_TIME_SHIFT:
-                    events.append(f"TimeShift_{MAX_TIME_SHIFT}")
-                    # If the NEXT note is masked, we mask the time shift leading to it?
-                    # Or if the PREVIOUS note was masked?
-                    # TimeShift belongs to the gap.
-                    # If we are entering a masked region, we should mask the shift so the model can decide when the next note starts.
-                    mask.append(is_masked) 
+                    shift_amount = MAX_TIME_SHIFT
+                    
+                    # Check if this TimeShift overlaps with the selection
+                    shift_start = current_tick
+                    shift_end = current_tick + shift_amount
+                    # Overlap logic: start < end_sel AND end > start_sel
+                    is_shift_masked = (shift_start < end_tick_selection and shift_end > start_tick_selection)
+                    
+                    events.append(f"TimeShift_{shift_amount}")
+                    mask.append(is_shift_masked) 
+                    
                     delta -= MAX_TIME_SHIFT
+                    current_tick += shift_amount
+                    
                 if delta > 0:
-                    events.append(f"TimeShift_{delta}")
-                    mask.append(is_masked)
-                current_tick = note['start']
+                    shift_amount = delta
+                    
+                    shift_start = current_tick
+                    shift_end = current_tick + shift_amount
+                    is_shift_masked = (shift_start < end_tick_selection and shift_end > start_tick_selection)
+                    
+                    events.append(f"TimeShift_{shift_amount}")
+                    mask.append(is_shift_masked)
+                    
+                    current_tick += shift_amount
             
             # Note tokens
             tokens = [
@@ -327,25 +343,34 @@ class MIDIPreprocessor:
             ]
             
             events.extend(tokens)
-            mask.extend([is_masked] * 4)
+            mask.extend([is_note_masked] * 4)
             
         # Add EOS
         events.append("<eos>")
         mask.append(False)
         
         # ELASTIC MASKING LOGIC
-        # We need to ensure there are enough slots in the masked region for the AI to write new music.
-        # If the selection is empty or sparse, we inject <pad> tokens to give it "scratch space".
-        
         # 1. Calculate Duration of Selection in Beats
-        selection_duration_ticks = (end_time - start_time) * TICKS_PER_BEAT
-        selection_duration_beats = selection_duration_ticks / TICKS_PER_BEAT
+        selection_duration_beats = (end_time - start_time)
         
-        # 2. Target Density
-        # A complex 16th note melody needs ~5 tokens per 1/4 beat.
-        # So ~20 tokens per beat is a safe upper bound for "busy" music.
-        TOKENS_PER_BEAT = 20 
-        target_count = int(selection_duration_beats * TOKENS_PER_BEAT)
+        # 2. Dynamic Density Calculation
+        # Calculate average density of the existing notes (unmasked context)
+        # If notes list is empty, default to moderate density
+        if len(notes) > 0:
+            total_duration_beats = (notes[-1]['start'] + notes[-1]['duration']) / TICKS_PER_BEAT
+            total_duration_beats = max(total_duration_beats, 1.0)
+            avg_notes_per_beat = len(notes) / total_duration_beats
+        else:
+            avg_notes_per_beat = 4.0 # Default assumption
+            
+        # Each note is ~5 tokens (including shifts)
+        # We want to allow for slightly higher density in the infill region to give freedom
+        estimated_tokens_per_beat = avg_notes_per_beat * 6 
+        
+        # Clamp density to reasonable bounds (e.g. min 10 tokens/beat, max 50)
+        target_density = max(15, min(60, estimated_tokens_per_beat * 1.5))
+        
+        target_count = int(selection_duration_beats * target_density)
         
         # 3. Count existing masked tokens
         current_masked_count = sum(mask)
@@ -354,46 +379,40 @@ class MIDIPreprocessor:
         needed = target_count - current_masked_count
         
         if needed > 0:
-            # Find where to insert (at the end of the masked region, or just before the first unmasked token after the region)
-            # We look for the transition from True to False
+            # Find where to insert. 
+            # Strategy: Insert after the FIRST masked token we find.
+            # If no masked tokens (e.g. pure silence that wasn't caught by TimeShift logic?), 
+            # we look for the TimeShift that covers the start time.
+            
             insert_index = -1
-            for i in range(len(mask) - 1, -1, -1):
+            
+            # First, try to find any masked token
+            for i in range(len(mask)):
                 if mask[i]:
-                    insert_index = i + 1
+                    insert_index = i + 1 # Insert after the first masked token
                     break
             
-            # If no masked tokens found (e.g. selecting empty silence), find where the silence *would* be
+            # If still -1, it means we have a selection but NO tokens were masked.
+            # This happens if the selection is in empty space at the end, or if my TimeShift logic above failed.
+            # But with the new TimeShift logic, if the selection overlaps any time, it should be masked.
+            # Unless the selection is AFTER the last note?
             if insert_index == -1:
-                # This is tricky. If we selected silence, we probably have TimeShifts that cover it.
-                # But we didn't mask the TimeShifts unless they were attached to notes?
-                # Actually, in the loop above, we mask TimeShifts if they lead to a masked note.
-                # If there are NO notes, nothing is masked.
-                
-                # Fallback: Insert at the point corresponding to start_time?
-                # For simplicity, let's insert after BOS if nothing else.
-                insert_index = 1 
-                
-                # But wait, if we select silence in the middle of a song, we need to find that spot.
-                # This simple logic might put it at the beginning.
-                # Ideally, we should find the TimeShift that crosses 'start_time'.
-                
-                # IMPROVED LOGIC:
-                # If we have a selection but no notes were captured, we likely want to insert 
-                # right where the time cursor would be.
-                # For now, let's just append to the end of the sequence if it's empty? No.
-                
-                # Let's stick to the simple case: If we have SOME masked tokens, we extend them.
-                # If we have ZERO masked tokens (pure silence selection), we might need to mask the TimeShift that covers this gap.
-                pass
-
+                # Check if selection is after the last note
+                last_note_end = notes[-1]['start'] + notes[-1]['duration'] if notes else 0
+                if start_tick_selection >= last_note_end:
+                    # We are appending to the end.
+                    # Insert before EOS
+                    insert_index = len(events) - 1
+            
             if insert_index != -1:
                 # Inject <pad> tokens
-                # We mark them as True (Masked) so the model can overwrite them
                 pads = ["<pad>"] * needed
                 pad_mask = [True] * needed
                 
                 events[insert_index:insert_index] = pads
                 mask[insert_index:insert_index] = pad_mask
+                
+        return " ".join(events), mask
                 
         return " ".join(events), mask
 

@@ -41,9 +41,8 @@ class MusicVocab:
         for i in range(128):
             self.add_token(f"Pitch_{i}")
             
-        # 4. Velocity (0 to 7, since we quantized by // 16)
-        # Actually preprocessing uses // 16, so 0-127 becomes 0-7.
-        for i in range(9): # 0-8 just to be safe
+        # 4. Velocity (0 to 7)
+        for i in range(9): # 0-7 just to be safe
             self.add_token(f"Vel_{i}")
             
         # 5. Duration (1 to 96)

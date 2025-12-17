@@ -134,7 +134,11 @@ def improve_music():
         start_time = selection_range.get('start', 0)
         end_time = selection_range.get('end', 0)
         
-        print(f"Improving range: {start_time} to {end_time}")
+        # Get generation parameters
+        temperature = data.get('temperature', 1.0)
+        steps = data.get('steps', 50)
+        
+        print(f"Improving range: {start_time} to {end_time} (Temp: {temperature}, Steps: {steps})")
         
         # Convert Context to Tokens with Mask
         token_str, mask_list = preprocessor.json_to_tokens_with_mask(current_notes, start_time, end_time)
@@ -156,7 +160,7 @@ def improve_music():
         print(f"Infilling with {mask_tensor.sum().item()} masked tokens...")
         with torch.no_grad():
             # We use the same infill method, but now the mask is in the middle!
-            output_ids = model.infill(input_ids, mask_tensor, steps=50)
+            output_ids = model.infill(input_ids, mask_tensor, steps=steps, temperature=temperature)
             
         # Decode
         out_tokens = vocab.decode(output_ids[0].cpu().tolist())

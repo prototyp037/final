@@ -149,8 +149,8 @@ def train():
     config = MusicGemmaConfig(
         vocab_size=len(vocab.token_to_id),
         hidden_size=512,
-        num_hidden_layers=8,
-        num_attention_heads=10,
+        num_hidden_layers=6,
+        num_attention_heads=8,
         max_position_embeddings=SEQ_LEN
     )
     
