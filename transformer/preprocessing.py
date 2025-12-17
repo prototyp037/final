@@ -47,6 +47,37 @@ def get_instrument_class(program, is_drum):
             return name
     return 'Unknown'
 
+def get_instrument_program_from_name(name):
+    """
+    Maps frontend instrument names to default MIDI programs.
+    """
+    name = name.lower()
+    if name == 'piano': return 0
+    if name == 'drums': return 'Drums' # Special token
+    if name == 'bass': return 32 # Acoustic Bass
+    if name == 'strings': return 40 # Violin
+    return 0 # Default to Piano
+
+def get_instrument_name_from_program(program):
+    """
+    Maps MIDI program (or 'Drums') back to frontend instrument name.
+    """
+    if program == 'Drums': return 'drums'
+    try:
+        prog = int(program)
+        # Use INSTRUMENT_CLASSES to find the category
+        for start, end, name in INSTRUMENT_CLASSES:
+            if start <= prog < end:
+                # Map category to frontend name
+                if name == 'Piano': return 'piano'
+                if name == 'Bass': return 'bass'
+                if name == 'Strings' or name == 'Ensemble': return 'strings'
+                # Map others to piano for now as we only have 4 synths
+                return 'piano'
+    except:
+        pass
+    return 'piano'
+
 class MIDIPreprocessor:
     def __init__(self, data_dir, output_dir):
         self.data_dir = data_dir
@@ -75,7 +106,11 @@ class MIDIPreprocessor:
         original_ticks_per_beat = midi_obj.ticks_per_beat
 
         for instrument in midi_obj.instruments:
-            inst_class = get_instrument_class(instrument.program, instrument.is_drum)
+            # Use Program Number directly (0-127) or 'Drums'
+            if instrument.is_drum:
+                inst_token = 'Drums'
+            else:
+                inst_token = instrument.program
             
             for note in instrument.notes:
                 # Quantize
@@ -92,11 +127,11 @@ class MIDIPreprocessor:
                     'pitch': note.pitch,
                     'velocity': note.velocity, 
                     'duration': duration,
-                    'instrument': inst_class
+                    'instrument': inst_token
                 })
 
         # Sort notes by start time, then pitch
-        notes.sort(key=lambda x: (x['start'], x['pitch'], x['instrument']))
+        notes.sort(key=lambda x: (x['start'], x['pitch'], str(x['instrument'])))
 
         if not notes:
             return None
@@ -159,19 +194,11 @@ class MIDIPreprocessor:
         midi_obj = miditoolkit.MidiFile()
         midi_obj.ticks_per_beat = TICKS_PER_BEAT
         
-        # Prepare tracks
-        # Map class name -> (program, is_drum)
-        # We pick the first program in the range for the class
-        class_to_program = {}
-        for start, end, name in INSTRUMENT_CLASSES:
-            class_to_program[name] = (start, False)
-        class_to_program['Drums'] = (0, True)
-        
-        # Dictionary to hold Instrument objects: key = class_name
+        # Dictionary to hold Instrument objects: key = program_id (or 'Drums')
         tracks = {}
         
         current_tick = 0
-        current_inst = None
+        current_inst = None # This will be program ID or 'Drums'
         current_pitch = None
         current_vel = None
         
@@ -181,14 +208,22 @@ class MIDIPreprocessor:
                 current_tick += shift
                 
             elif token.startswith("Inst_"):
-                inst_name = token.split("_")[1]
-                current_inst = inst_name
+                inst_val = token.split("_")[1]
+                current_inst = inst_val
                 
                 # Create track if not exists
-                if inst_name not in tracks:
-                    program, is_drum = class_to_program.get(inst_name, (0, False))
-                    track = miditoolkit.Instrument(program=program, is_drum=is_drum, name=inst_name)
-                    tracks[inst_name] = track
+                if inst_val not in tracks:
+                    if inst_val == 'Drums':
+                        program = 0
+                        is_drum = True
+                        name = 'Drums'
+                    else:
+                        program = int(inst_val)
+                        is_drum = False
+                        name = f"Instrument_{program}"
+                        
+                    track = miditoolkit.Instrument(program=program, is_drum=is_drum, name=name)
+                    tracks[inst_val] = track
                     midi_obj.instruments.append(track)
                     
             elif token.startswith("Pitch_"):
@@ -203,14 +238,16 @@ class MIDIPreprocessor:
                 duration = int(token.split("_")[1])
                 
                 # We have all info for a note now
-                if current_inst and current_pitch is not None and current_vel is not None:
-                    note = miditoolkit.Note(
-                        velocity=current_vel,
-                        pitch=current_pitch,
-                        start=current_tick,
-                        end=current_tick + duration
-                    )
-                    tracks[current_inst].notes.append(note)
+                if current_inst is not None and current_pitch is not None and current_vel is not None:
+                    # Check if track exists (it should)
+                    if current_inst in tracks:
+                        note = miditoolkit.Note(
+                            velocity=current_vel,
+                            pitch=current_pitch,
+                            start=current_tick,
+                            end=current_tick + duration
+                        )
+                        tracks[current_inst].notes.append(note)
 
         if output_path:
             midi_obj.dump(output_path)
@@ -224,11 +261,9 @@ class MIDIPreprocessor:
         """
         notes = []
         for n in json_notes:
-            # Map frontend instrument names to classes
-            # Frontend: "piano", "drums", "bass", "strings"
-            # Classes: "Piano", "Drums", "Bass", "Strings" (Capitalized)
-            inst = n.get('instrument', 'piano').capitalize()
-            if inst == 'Drums': inst = 'Drums' # Special case if needed
+            # Map frontend instrument names to Program IDs
+            inst_name = n.get('instrument', 'piano')
+            inst_program = get_instrument_program_from_name(inst_name)
             
             # Quantize
             start_tick = int(round(n['startTime'] * TICKS_PER_BEAT))
@@ -240,10 +275,10 @@ class MIDIPreprocessor:
                 'pitch': n['pitch'],
                 'velocity': 100, # Default velocity
                 'duration': duration,
-                'instrument': inst
+                'instrument': inst_program
             })
             
-        notes.sort(key=lambda x: (x['start'], x['pitch'], x['instrument']))
+        notes.sort(key=lambda x: (x['start'], x['pitch'], str(x['instrument'])))
         
         events = []
         current_tick = 0
@@ -272,8 +307,8 @@ class MIDIPreprocessor:
         """
         notes = []
         for n in json_notes:
-            inst = n.get('instrument', 'piano').capitalize()
-            if inst == 'Drums': inst = 'Drums'
+            inst_name = n.get('instrument', 'piano')
+            inst_program = get_instrument_program_from_name(inst_name)
             
             start_tick = int(round(n['startTime'] * TICKS_PER_BEAT))
             duration = int(round(n['duration'] * TICKS_PER_BEAT))
@@ -284,11 +319,11 @@ class MIDIPreprocessor:
                 'pitch': n['pitch'],
                 'velocity': 100,
                 'duration': duration,
-                'instrument': inst,
+                'instrument': inst_program,
                 'original_start': n['startTime'] # Keep original for masking check
             })
             
-        notes.sort(key=lambda x: (x['start'], x['pitch'], x['instrument']))
+        notes.sort(key=lambda x: (x['start'], x['pitch'], str(x['instrument'])))
         
         events = []
         mask = [] # Boolean list
@@ -424,7 +459,7 @@ class MIDIPreprocessor:
         json_notes = []
         
         current_tick = 0
-        current_inst = "Piano"
+        current_inst = "piano" # Default frontend name
         current_pitch = 60
         current_vel = 100
         
@@ -434,7 +469,9 @@ class MIDIPreprocessor:
                 current_tick += shift
                 
             elif token.startswith("Inst_"):
-                current_inst = token.split("_")[1].lower()
+                inst_val = token.split("_")[1]
+                # Map program ID back to frontend name
+                current_inst = get_instrument_name_from_program(inst_val)
                 
             elif token.startswith("Pitch_"):
                 current_pitch = int(token.split("_")[1])

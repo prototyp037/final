@@ -28,14 +28,10 @@ class MusicVocab:
             self.add_token(f"TimeShift_{i}")
             
         # 2. Instruments
-        instruments = [
-            'Piano', 'ChromaticPercussion', 'Organ', 'Guitar', 'Bass', 
-            'Strings', 'Ensemble', 'Brass', 'Reed', 'Pipe', 
-            'SynthLead', 'SynthPad', 'SynthEffects', 'Ethnic', 
-            'Percussive', 'SoundEffects', 'Drums'
-        ]
-        for inst in instruments:
-            self.add_token(f"Inst_{inst}")
+        # Expanded to full General MIDI (0-127) + Drums
+        for i in range(128):
+            self.add_token(f"Inst_{i}")
+        self.add_token("Inst_Drums")
             
         # 3. Pitch (0 to 127)
         for i in range(128):
